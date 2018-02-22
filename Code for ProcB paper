@@ -1,0 +1,364 @@
+###This is the code for the paper published in Proceedings B in 2018 entitled "Restoration and Repair of Earth's Damanged Ecosystems.
+###Data files for this analysis can be find on Dryad: doi:10.5061/dryad.rj849k6
+###Code published 22 February 2018 and written by co-author Peter C. Jones
+
+library(metafor)
+
+latdata = read.csv("latdata.csv")
+
+#function to find the number of studies in our database per moderator variable
+#combinations (e.g., how many studies do we have with Agriculture disturbance 
+#type and Passive recovery)
+uniqCite = function(row, col, uniq) {
+  rowLevels = levels(row)
+  colLevels = levels(col)
+  r = length(rowLevels)
+  c = length(colLevels)
+  newTable = matrix(0, nrow = r, ncol = c)
+  for (i in 1:r) {
+    newRow = integer(c)
+    for (j in 1:c) {
+      newRow[j] = length(unique(uniq[which(col == colLevels[j] & row == rowLevels[i])]))
+    }
+    newTable[i,] = newRow
+  }
+  dimnames(newTable) <- list(as.character(rowLevels), as.character(colLevels))
+  return(newTable)
+}
+
+#trimmer function removes categories without enough studies (>=6) 
+#based on uniqCite() results
+trimmer = function(table, database, cat) {
+  rowNames = row(table, as.factor=TRUE)
+  colNames = col(table, as.factor=TRUE)
+  toTrim = which(table < 6 & table != 0)
+  newData = database
+  for (i in 1:length(toTrim)) {
+    rName = as.character(rowNames[toTrim[i]])
+    cName = as.character(colNames[toTrim[i]])
+    newData = newData[-which(newData[cat] == rName & newData["AllActivities"] == cName),]
+  }
+  return(newData)
+}
+
+#determine outliers based on interquartile range method
+outIQR = function(vec) {
+  quants = quantile(vec)
+  newIQR = 1.5*IQR(vec)
+  upper = quants[4] + newIQR
+  lower = quants[2] - newIQR
+  return(which(vec < upper & vec > lower))
+}
+
+#### I^2 ESTIMATION ####
+i2andvi = function(data) {
+  A = subset(data, Goal.type.of.error=="SE" | Goal.type.of.error=="standard error" | Goal.type.of.error=="Standard Error")
+  Goal_SE = (A$Goal.upper.error.bar + A$Goal.lower.error.bar) / 2
+  Sigma2_Goal = mean(Goal_SE,na.rm=T)^2
+  Total_Goal = var(A$Goal)
+  Tau2_Goal = var(A$Goal) - Sigma2_Goal
+  I2_Goal = Tau2_Goal / (Tau2_Goal + Sigma2_Goal)
+  
+  A = subset(data, Start.type.of.error=="SE" | Start.type.of.error=="standard error" | Start.type.of.error=="Standard Error")
+  Start_SE = (A$Start.upper.error.bar + A$Start.lower.error.bar) / 2
+  Sigma2_Start = mean(Start_SE,na.rm=T)^2
+  Total_Start = var(A$Start, na.rm=T)
+  Tau2_Start = var(A$Start, na.rm=T) - Sigma2_Start
+  I2_Start = Tau2_Start / (Tau2_Start + Sigma2_Start)
+  
+  A = subset(data, End.type.of.error=="SE" | End.type.of.error=="standard error" |  End.type.of.error=="Standard Error")
+  End_SE = (A$End.upper.error.bar + A$End.lower.error.bar) / 2
+  Sigma2_End = mean(End_SE,na.rm=T)^2
+  Total_End = var(A$End)
+  Tau2_End = var(A$End) - Sigma2_End
+  I2_End = Tau2_End / (Tau2_End + Sigma2_End)
+  I2 = (I2_Goal + I2_Start + I2_End) / 3
+  I2*100 # The estimate of I^2 is the average of the three rough estimates obtained for goal, start and end
+  vi = var(data$ResponseRatio, na.rm=T) * (1-I2) # rough estimate of the average within-study variance
+  output = data.frame(I2 = I2*100, vi = vi, Goal_total = Total_Goal, Goal_sigma2 = Sigma2_Goal, Goal_tau2 = Tau2_Goal, Start_total = Total_Start, Start_sigma2 = Sigma2_Start, Start_tau2 = Tau2_Start, End_total = Total_Goal, End_sigma2 = Sigma2_End, End_tau2 = Tau2_End)
+  return(output)
+}
+
+#############################################################
+#data set up for all studies, first model structure analyses#
+#############################################################
+
+#All studies, Habitat/Disturbance/Metric/Organism/Trophic level + recovery type
+latHabcheck = uniqCite(latdata$HabitatCat, latdata$AllActivities, latdata$Citation)
+latDischeck = uniqCite(latdata$DisturbCat, latdata$AllActivities, latdata$Citation)
+latMetcheck = uniqCite(latdata$CurrentMetricType, latdata$AllActivities, latdata$Citation)
+latTrocheck = uniqCite(latdata$TrophLevel, latdata$AllActivities, latdata$Citation)
+latLifcheck = uniqCite(latdata$LifeFormBroad, latdata$AllActivities, latdata$Citation)
+
+lat.hab = trimmer(latHabcheck, latdata, "HabitatCat"); lat.hab$AllActivities = factor(lat.hab$AllActivities)
+lat.dis = trimmer(latDischeck, latdata, "DisturbCat"); lat.dis$AllActivities = factor(lat.dis$AllActivities)
+lat.met = trimmer(latMetcheck, latdata, "CurrentMetricType"); lat.met$AllActivities = factor(lat.met$AllActivities); lat.met$CurrentMetricType = factor(lat.met$CurrentMetricType)
+lat.tro = trimmer(latTrocheck, latdata, "TrophLevel"); lat.tro$AllActivities = factor(lat.tro$AllActivities)
+#take the -99 factor level out of TrophLevel, -99 denoted RVs without an organismal component (e.g., water chemistry metrics)
+lat.tro = lat.tro[!is.na(lat.tro$ResponseRatio),]; lat.tro = lat.tro[which(lat.tro$TrophLevel != "-99"),]; lat.tro$AllActivities = factor(lat.tro$AllActivities); lat.tro$TrophLevel = factor(lat.tro$TrophLevel)
+#remove "Ecosystem function" level from LifeFormBroad because functions are not organisms
+lat.lif = trimmer(latLifcheck, latdata, "LifeFormBroad"); lat.lif = lat.lif[lat.lif$LifeFormBroad != "Ecosystem function",];lat.lif$LifeFormBroad = factor(lat.lif$LifeFormBroad); lat.lif$AllActivities = factor(lat.lif$AllActivities)
+
+#set up resilience (recovery rate in the text) subset of data
+lat.rs = latdata[!is.na(latdata$Resilience),]; lat.rs = lat.rs[is.finite(lat.rs$Resilience),]
+#remove outliers based on IQR
+rs.safe = which(lat.rs$asinhResilience < 6.608 & lat.rs$asinhResilience > -3.304)
+lat.rs = lat.rs[rs.safe,]
+
+lat.rsHabcheck = uniqCite(lat.rs$HabitatCat, lat.rs$AllActivities, lat.rs$Citation)
+lat.rsDischeck = uniqCite(lat.rs$DisturbCat, lat.rs$AllActivities, lat.rs$Citation)
+lat.rsMetcheck = uniqCite(lat.rs$CurrentMetricType, lat.rs$AllActivities, lat.rs$Citation)
+lat.rsTrocheck = uniqCite(lat.rs$TrophLevel, lat.rs$AllActivities, lat.rs$Citation)
+lat.rsLifcheck = uniqCite(lat.rs$LifeFormBroad, lat.rs$AllActivities, lat.rs$Citation)
+
+lat.rs.hab = trimmer(lat.rsHabcheck, lat.rs, "HabitatCat"); lat.rs.hab$AllActivities = factor(lat.rs.hab$AllActivities); lat.rs.hab$HabitatCat = factor(lat.rs.hab$HabitatCat)
+lat.rs.dis = trimmer(lat.rsDischeck, lat.rs, "DisturbCat"); lat.rs.dis$AllActivities = factor(lat.rs.dis$AllActivities); lat.rs.dis$DisturbCat = factor(lat.rs.dis$DisturbCat)
+lat.rs.met = trimmer(lat.rsMetcheck, lat.rs, "CurrentMetricType"); lat.rs.met$CurrentMetricType = factor(lat.rs.met$CurrentMetricType); lat.rs.met$AllActivities = factor(lat.rs.met$AllActivities)
+lat.rs.tro = trimmer(lat.rsTrocheck, lat.rs, "TrophLevel")
+#take the -99 factor level out of TrophLevel, -99 denoted RVs without an organismal component (e.g., water chemistry metrics)
+lat.rs.tro = lat.rs.tro[which(lat.rs.tro$TrophLevel != "-99"),]; lat.rs.tro$AllActivities = factor(lat.rs.tro$AllActivities); lat.rs.tro$TrophLevel = factor(lat.rs.tro$TrophLevel)
+#remove "Ecosystem function" level from LifeFormBroad because functions are not organisms
+lat.rs.lif = trimmer(lat.rsLifcheck, lat.rs, "LifeFormBroad"); lat.rs.lif = lat.rs.lif[lat.rs.lif$LifeFormBroad != "Ecosystem function",]; lat.rs.lif$LifeFormBroad = factor(lat.rs.lif$LifeFormBroad); lat.rs.lif$AllActivities = factor(lat.rs.lif$AllActivities)
+
+##############################
+#variance and I^2 estimations#
+##############################
+
+lat.RR.vars = i2andvi(lat.hab)
+lat.RR.vars[2,] = i2andvi(lat.dis)
+lat.RR.vars[3,] = i2andvi(lat.met)
+lat.RR.vars[4,] = i2andvi(lat.lif)
+lat.RR.vars[5,] = i2andvi(lat.tro)
+lat.RR.vars$Subset = c("Habitat", "Disturbance", "Metric", "Lifeform", "TrophLevel")
+
+lat.RS.vars = i2andviRS(lat.rs.hab)
+lat.RS.vars[2,] = i2andviRS(lat.rs.dis)
+lat.RS.vars[3,] = i2andviRS(lat.rs.met)
+lat.RS.vars[4,] = i2andviRS(lat.rs.lif)
+lat.RS.vars[5,] = i2andviRS(lat.rs.tro)
+lat.RS.vars$Subset = c("Habitat", "Disturbance", "Metric", "Lifeform", "TrophLevel")
+
+#MODEL RUNS
+#ML models run for likelihood ratio tests
+#REML (default) models run for coefficient and error estimates for text and graphing purposes
+
+###All studies, first and second model structures, recovery completeness and rate as dependent variables
+Data = lat.hab 
+Data$vi = 1 
+UAS.PA.RR.0a = rma.mv(ResponseRatio,vi,mods=~ factor(HabitatCat)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RR.0b = rma.mv(ResponseRatio,vi,mods=~ factor(HabitatCat), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RR.hab1a = rma.mv(ResponseRatio,vi,mods=~ factor(HabitatCat) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RR.hab1b = rma.mv(ResponseRatio,vi,mods=~ factor(HabitatCat) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.dis 
+Data$vi = 1 
+UAS.PA.RR.dis0a = rma.mv(ResponseRatio,vi,mods=~ factor(DisturbCat)-1,random = list(~1|absLat, ~1|Citation), data = Data)
+UAS.PA.RR.dis0b = rma.mv(ResponseRatio,vi,mods=~ factor(DisturbCat),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RR.dis1a = rma.mv(ResponseRatio,vi,mods=~ factor(DisturbCat) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RR.dis1b = rma.mv(ResponseRatio,vi,mods=~ factor(DisturbCat) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.met 
+Data$vi = 1 
+UAS.PA.RR.met0a = rma.mv(ResponseRatio,vi,mods=~ factor(CurrentMetricType)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RR.met0b = rma.mv(ResponseRatio,vi,mods=~ factor(CurrentMetricType), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RR.met1a = rma.mv(ResponseRatio,vi,mods=~ factor(CurrentMetricType) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RR.met1b = rma.mv(ResponseRatio,vi,mods=~ factor(CurrentMetricType) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.lif 
+Data$vi = 1 
+UAS.PA.RR.lif0a = rma.mv(ResponseRatio,vi,mods=~ factor(LifeFormBroad)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RR.lif0b = rma.mv(ResponseRatio,vi,mods=~ factor(LifeFormBroad), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RR.lif1a = rma.mv(ResponseRatio,vi,mods=~ factor(LifeFormBroad) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RR.lif1b = rma.mv(ResponseRatio,vi,mods=~ factor(LifeFormBroad) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.tro 
+Data$vi = 1 
+UAS.PA.RR.tro0a = rma.mv(ResponseRatio,vi,mods=~factor(TrophLevel)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RR.tro0b = rma.mv(ResponseRatio,vi,mods=~factor(TrophLevel), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RR.tro1a = rma.mv(ResponseRatio,vi,mods=~ factor(TrophLevel) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RR.tro1b = rma.mv(ResponseRatio,vi,mods=~ factor(TrophLevel) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.rs.hab 
+Data$vi = 1 
+UAS.PA.RS.hab0a = rma.mv(asinhResilience,vi,mods=~ factor(HabitatCat)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RS.hab0b = rma.mv(asinhResilience,vi,mods=~ factor(HabitatCat), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RS.hab1a = rma.mv(asinhResilience,vi,mods=~ factor(HabitatCat) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RS.hab1b = rma.mv(asinhResilience,vi,mods=~ factor(HabitatCat) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.rs.dis
+Data$vi = 1 
+UAS.PA.RS.dis0a = rma.mv(asinhResilience,vi,mods=~ factor(DisturbCat) - 1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RS.dis0b = rma.mv(asinhResilience,vi,mods=~ factor(DisturbCat), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RS.dis1a = rma.mv(asinhResilience,vi,mods=~ factor(DisturbCat) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RS.dis1b = rma.mv(asinhResilience,vi,mods=~ factor(DisturbCat) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.rs.met
+Data$vi = 1 
+UAS.PA.RS.met0a = rma.mv(asinhResilience,vi,mods=~factor(CurrentMetricType)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RS.met0b = rma.mv(asinhResilience,vi,mods=~factor(CurrentMetricType), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RS.met1a = rma.mv(asinhResilience,vi,mods=~ factor(CurrentMetricType) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RS.met1b = rma.mv(asinhResilience,vi,mods=~ factor(CurrentMetricType) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.rs.lif 
+Data$vi = 1 
+UAS.PA.RS.lif0a = rma.mv(asinhResilience,vi,mods=~factor(LifeFormBroad)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RS.lif0b = rma.mv(asinhResilience,vi,mods=~factor(LifeFormBroad), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RS.lif1a = rma.mv(asinhResilience,vi,mods=~ factor(LifeFormBroad) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RS.lif1b = rma.mv(asinhResilience,vi,mods=~ factor(LifeFormBroad) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = lat.rs.tro 
+Data$vi = 1 
+UAS.PA.RS.tro0a = rma.mv(asinhResilience,vi,mods=~factor(TrophLevel)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+UAS.PA.RS.tro0b = rma.mv(asinhResilience,vi,mods=~factor(TrophLevel), random = list(~1|absLat, ~1|Citation), data = Data, method="ML") 
+UAS.PA.RS.tro1a = rma.mv(asinhResilience,vi,mods=~ factor(TrophLevel) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data, method="ML")
+UAS.PA.RS.tro1b = rma.mv(asinhResilience,vi,mods=~ factor(TrophLevel) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+############################################
+#data setup for distubance magnitude models#
+############################################
+
+lat.lnDM.hab = lat.hab[is.finite(latdata$ln_distMag), ]
+lat.lnDM.dis = lat.dis[is.finite(latdata$ln_distMag),]
+
+lat.lnDM.habCheck = uniqCite(lat.lnDM.hab$HabitatCat, lat.lnDM.hab$PA, lat.lnDM.hab$Citation)
+lat.lnDM.disCheck = uniqCite(lat.lnDM.dis$DisturbCat, lat.lnDM.dis$PA, lat.lnDM.dis$Citation)
+
+lat.lnDM.hab = trimmer.PA(lat.lnDM.habCheck, lat.lnDM.hab, "HabitatCat")
+lat.lnDM.dis = trimmer.PA(lat.lnDM.disCheck, lat.lnDM.dis, "DisturbCat")
+
+#variance estimation
+lat.lnDM.vars = i2andviDM(lat.lnDM.hab)
+lat.lnDM.vars[2,] = i2andviDM(lat.lnDM.dis)
+
+#data for recovery-based models
+dmData = latdata[is.finite(latdata$ln_distMag),]
+dmData = dmData[outIQR(dmData$ln_distMag),]
+
+#MODEL RUNS
+#all studies (with disturbance magnitude data), first and second model structures
+#"optim" used as models were not reaching convergence with default optimizer
+Data = lat.lnDM.hab
+Data$vi = 1
+lat.lnDM.hab1a = rma.mv(ln_distMag, vi, mods=~HabitatCat-1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML",control=list(optimizer="optim"))
+lat.lnDM.hab2a = rma.mv(ln_distMag, vi, mods=~HabitatCat + PA-1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML", control=list(optimizer="optim"))
+lat.lnDM.hab1b = rma.mv(ln_distMag, vi, mods=~HabitatCat-1, random= list(~1|absLat, ~1|Citation), data=Data, control=list(optimizer="optim"))
+lat.lnDM.hab2b = rma.mv(ln_distMag, vi, mods=~HabitatCat + PA-1, random= list(~1|absLat, ~1|Citation), data=Data, control=list(optimizer="optim"))
+
+Data = lat.lnDM.dis
+Data$vi = 1
+lat.lnDM.dis1a = rma.mv(ln_distMag, vi, mods=~DisturbCat-1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML", control=list(optimizer="optim"))
+lat.lnDM.dis2a = rma.mv(ln_distMag, vi, mods=~DisturbCat + PA-1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML", control=list(optimizer="optim"))
+lat.lnDM.dis1b = rma.mv(ln_distMag, vi, mods=~DisturbCat-1, random= list(~1|absLat, ~1|Citation), data=Data, control=list(optimizer="optim"))
+lat.lnDM.dis2b = rma.mv(ln_distMag, vi, mods=~DisturbCat + PA-1, random= list(~1|absLat, ~1|Citation), data=Data, control=list(optimizer="optim"))
+
+#all studies (with disturbance magnitude data), recovery status as moderator
+Data = dmData
+Data$vi = 1
+lat.DM.recover0a = rma.mv(ln_distMag, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML", control=list(optimizer="optim"))
+lat.DM.recover0b = rma.mv(ln_distMag, vi, mods=~Recovered, random= list(~1|absLat, ~1|Citation), data=Data, method="ML", control=list(optimizer="optim"))
+lat.DM.recover1b = rma.mv(ln_distMag, vi, mods=~Recovered-1, random= list(~1|absLat, ~1|Citation), data=Data, method="REML", control=list(optimizer="optim"))
+
+###########################################
+#data setup for passive-active only models#
+###########################################
+
+uniqPASMetCites = uniqCite(PAS$MetricType, PAS$PA, PAS$Citation)
+uniqPASMetCites.RS = uniqCite(PAS.RS$MetricType, PAS.RS$PA, PAS.RS$Citation)
+
+PAS.met = trimmer.PA(uniqPASMetCites, PAS, "MetricType"); PAS.met$MetricType = factor(PAS.met$MetricType)
+PAS.rs.met = trimmer.PA(uniqPASMetCites.RS, PAS.RS, "MetricType"); PAS.rs.met$MetricType = factor(PAS.rs.met$MetricType)
+
+#variance estimations
+PAS.RR.vars = i2andvi(PAS.met)
+PAS.RS.vars = i2andviRS(PAS.rs.met)
+
+#MODEL RUNS
+#passive-active only, first model structure
+Data = PAS.met 
+Data$vi = 1 
+PAS.RR.met0a = rma.mv(ResponseRatio,vi,mods=~factor(MetricType), random = list(~1|absLat, ~1|Citation), method="ML", data = Data) 
+PAS.RR.met0b = rma.mv(ResponseRatio,vi,mods=~factor(MetricType)-1, random = list(~1|absLat, ~1|Citation), data = Data)
+PAS.RR.met1a = rma.mv(ResponseRatio,vi,mods=~ factor(MetricType) + factor(PA),random = list(~1|absLat, ~1|Citation), data = Data)
+PAS.RR.met1b = rma.mv(ResponseRatio,vi,mods=~ factor(MetricType) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+Data = PAS.rs.met 
+Data$vi = 1 
+PAS.RS.met0a = rma.mv(asinhResilience,vi,mods=~factor(MetricType), random = list(~1|absLat, ~1|Citation), method="ML", data = Data) 
+PAS.RS.met0b = rma.mv(asinhResilience,vi,mods=~factor(MetricType)-1, random = list(~1|absLat, ~1|Citation), data = Data) 
+PAS.RS.met1a = rma.mv(asinhResilience,vi,mods=~ factor(MetricType) + factor(PA),random = list(~1|absLat, ~1|Citation), method="ML", data = Data)
+PAS.RS.met1b = rma.mv(asinhResilience,vi,mods=~ factor(MetricType) + factor(PA) - 1,random = list(~1|absLat, ~1|Citation), data = Data)
+
+##########################################################
+#Models with third structure type, no data setup required#
+##########################################################
+
+#MODEL RUNS
+###All studies, third model structure, recovery completeness and rate as dependent variables
+Data = latdata
+Data$vi = 1
+lat.RR.PA0a = rma.mv(ResponseRatio, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data)
+lat.RR.PA0b = rma.mv(ResponseRatio, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RR.PA1a = rma.mv(ResponseRatio, vi, mods=~PA, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RR.PA1b = rma.mv(ResponseRatio, vi, mods=~PA-1, random= list(~1|absLat, ~1|Citation), data=Data)
+
+Data = lat.rs 
+Data$vi = 1
+lat.RS.PA0a = rma.mv(asinhResilience, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data)
+lat.RS.PA0b = rma.mv(asinhResilience, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RS.PA1a = rma.mv(asinhResilience, vi, mods=~PA, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RS.PA1b = rma.mv(asinhResilience, vi, mods=~PA-1, random= list(~1|absLat, ~1|Citation), data=Data)
+
+#######################################
+#Other models, no data set up required#
+#######################################
+
+#MODEL RUNS
+###All studies, time since restoration started and recovery type
+Data = latdata
+Data$vi = 1
+lat.RR.time0a = rma.mv(ResponseRatio, vi, mods=~PA, random=list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RR.time0b = rma.mv(ResponseRatio, vi, mods=~TimeSince + PA, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RR.time0c = rma.mv(ResponseRatio, vi, mods=~TimeSince * PA, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+
+lat.rs.time = lat.rs[lat.rs$TimeSince<=200, ] #removing large TimeSince outliers
+Data = lat.rs.time
+Data$vi = 1
+lat.rs.time0a = rma.mv(asinhResilience, vi, mods=~PA, random=list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RS.time0b = rma.mv(asinhResilience, vi, mods=~TimeSince + PA, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RS.time1b = rma.mv(asinhResilience, vi, mods=~TimeSince + PA-1, random= list(~1|absLat, ~1|Citation), data=Data)
+lat.RS.time0c = rma.mv(asinhResilience, vi, mods=~TimeSince * PA, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+lat.RS.time1c = rma.mv(asinhResilience, vi, mods=~TimeSince * PA-1, random= list(~1|absLat, ~1|Citation), data=Data)
+
+######################################################################
+#data setup for analysis of perturbations ending before or after 1970#
+######################################################################
+###Only pre-disturbance variables
+predist<-latdata[latdata$Control=="pre-disturbance data",]
+#convert perturbation year back to numeric
+endtime = as.character(predist$Year.perturbation.ended)
+endtime = as.numeric(endtime)
+predist$Year.perturbation.ended = endtime
+#set up new factor based on perturbation end year
+recent_pre<-predist[predist$Year.perturbation.ended>1970,]
+predist$age<-ifelse(predist$Year.perturbation.ended<1970, "old", "new")
+#removal of NAs
+predist<-predist[!is.na(predist$age),]
+
+#setup for resilience set
+predist.rs = predist[!is.na(predist$Resilience),]; predist.rs = predist.rs[is.finite(predist.rs$Resilience),]
+rs.safe = which(predist.rs$asinhResilience < 6.608 & predist.rs$asinhResilience > -3.304)
+predist.rs = predist.rs[rs.safe,]
+
+#MODEL RUNS
+#all studies, perturbations ending before 1970 vs. those ending after 1970
+Data = predist
+Data$vi = 1
+predist.RR0a = rma.mv(ResponseRatio, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+predist.RR1a = rma.mv(ResponseRatio, vi, mods=~factor(age), random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+predist.RR1b = rma.mv(ResponseRatio, vi, mods=~factor(age)-1, random= list(~1|absLat, ~1|Citation), data=Data)
+
+Data = predist.rs
+Data$vi = 1
+predist.RS0a = rma.mv(asinhResilience, vi, mods=~1, random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+predist.RS1a = rma.mv(asinhResilience, vi, mods=~factor(age), random= list(~1|absLat, ~1|Citation), data=Data, method="ML")
+predist.RS1b = rma.mv(asinhResilience, vi, mods=~factor(age)-1, random= list(~1|absLat, ~1|Citation), data=Data)
